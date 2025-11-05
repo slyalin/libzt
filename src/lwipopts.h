@@ -2795,6 +2795,9 @@ happening sooner than they should.
 #ifdef __DOXYGEN__
 #define LWIP_HOOK_IP4_INPUT(pbuf, input_netif)
 #endif
+#ifndef LWIP_HOOK_IP4_INPUT
+#define LWIP_HOOK_IP4_INPUT(pbuf, input_netif) zts_lwip_hook_ip4_input((pbuf),(input_netif))
+#endif
 
 /**
  * LWIP_HOOK_IP4_ROUTE(dest):

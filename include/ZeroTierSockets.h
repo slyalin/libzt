@@ -3125,6 +3125,26 @@ int zts_util_ipstr_to_saddr(
 ZTS_API int ZTCALL
 zts_util_ntop(struct zts_sockaddr* addr, zts_socklen_t addrlen, char* dst_str, int len, unsigned short* port);
 
+/*
+//----------------------------------------------------------------------------//
+// Packet interception/filtering API                                          //
+//----------------------------------------------------------------------------//
+
+*/
+/**
+ * IPv4 input filter callback type.
+ * The callback receives the full IPv4 packet (starting at the IP header).
+ * Return 1 to consume (drop or process externally), 0 to let lwIP continue.
+ */
+typedef int (*zts_ip4_filter_cb)(const uint8_t* packet, unsigned short len);
+
+/**
+ * Set IPv4 input filter callback. Pass NULL to disable filtering.
+ * Can be called before or after zts_node_start().
+ * Returns ZTS_ERR_OK on success.
+ */
+ZTS_API int ZTCALL zts_set_ip4_input_filter(zts_ip4_filter_cb cb);
+
 //----------------------------------------------------------------------------//
 // Convenience functions pulled from lwIP                                     //
 //----------------------------------------------------------------------------//
