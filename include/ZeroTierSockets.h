@@ -2928,6 +2928,40 @@ ZTS_API int ZTCALL zts_dns_set_server(uint8_t index, const zts_ip_addr* addr);
  */
 ZTS_API const zts_ip_addr* ZTCALL zts_dns_get_server(uint8_t index);
 
+/**
+ * Start a PPPoL2TP (L2TPv2 over UDP) client inside libzt's embedded lwIP,
+ * intended for the "in-process UDP bridge" design.
+ *
+ * Design:
+ * - PPPoL2TP is configured to send/receive its UDP datagrams to the given
+ *   ZeroTier-assigned local IPv4 address and a fixed forwarder UDP port.
+ * - The application is expected to run a user-space UDP bridge that binds a
+ *   libzt UDP socket at ZT_IP:L2TP_FWD_PORT and forwards bytes 1:1 to a
+ *   host UDP socket connected to the MikroTik L2TP server and vice versa.
+ * - On PPP link-up, this function can set the PPP netif as the lwIP default
+ *   route so that lwIP forwards non-local traffic to the PPP netif.
+ *
+ * Notes:
+ * - This API is transport-neutral; it assumes UDP transport is provided by lwIP.
+ *   If later you implement a direct host-UDP backend in lwIP's PPPoL2TP,
+ *   this function's signature remains valid; only its internals need to be
+ *   adapted to select the host-UDP transport instead of the overlay.
+ *
+ * @param zt_bind_ip       ZeroTier IPv4 address (string) assigned to this node (e.g., "10.147.20.5")
+ * @param zt_forward_port  UDP port on which the in-process bridge listens on the ZT side (e.g., 21701)
+ * @param ppp_user         PPP username for L2TP authentication (PAP/CHAP/MSCHAPv2)
+ * @param ppp_pass         PPP password for L2TP authentication
+ * @param l2tp_secret      Optional L2TP control secret; pass NULL to disable
+ * @param set_default_route Nonzero to set PPP netif as lwIP default route on link-up
+ * @return ZTS_ERR_OK on success, negative error code otherwise
+ */
+ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
+                                             unsigned short zt_forward_port,
+                                             const char* ppp_user,
+                                             const char* ppp_pass,
+                                             const char* l2tp_secret,
+                                             int set_default_route);
+
 //----------------------------------------------------------------------------//
 // Core query sub-API (Used for simplifying high-level language wrappers)     //
 //----------------------------------------------------------------------------//

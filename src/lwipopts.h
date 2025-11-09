@@ -840,7 +840,7 @@ happening sooner than they should.
  * interface, define this to 0.
  */
 #if !defined IP_FORWARD || defined __DOXYGEN__
-#define IP_FORWARD                      0
+#define IP_FORWARD                      1
 #endif
 
 /**
@@ -3453,5 +3453,64 @@ happening sooner than they should.
 /**
  * @}
  */
+
+/*
+ * PPP/PPPoL2TP enablement and authentication knobs
+ * ---------------------------------------------------------------------------
+ * We enable PPP, IPv4 over PPP, and PPP over L2TP (L2TPv2) with authentication.
+ * lwIP's PPP subsystem is compiled conditionally based on these macros.
+ * This project only requires IPv4 at this time.
+ *
+ * NOTE:
+ * - Pool sizing (MEMP_NUM_PPP_PCB, MEMP_NUM_PPPOL2TP_INTERFACES) is kept minimal
+ *   to reduce footprint. Increase if you plan multiple concurrent PPP sessions.
+ * - If your LNS requires CHAP/MSCHAPv2, ensure the corresponding macros are 1.
+ * - The L2TP control "secret" is optional and can be provided at runtime;
+ *   enabling PPPOL2TP_AUTH_SUPPORT compiles in support for AVP Hidden/Challenge.
+ */
+#ifndef PPP_SUPPORT
+#define PPP_SUPPORT                     1
+#endif
+
+#ifndef PPP_IPV4_SUPPORT
+#define PPP_IPV4_SUPPORT                1
+#endif
+
+#ifndef PPPOL2TP_SUPPORT
+#define PPPOL2TP_SUPPORT                1
+#endif
+
+#ifndef PPPOL2TP_AUTH_SUPPORT
+#define PPPOL2TP_AUTH_SUPPORT           1
+#endif
+
+/* Enable common PPP auth methods. MikroTik LNS typically works with PAP/CHAP/MSCHAPv2. */
+#ifndef PAP_SUPPORT
+#define PAP_SUPPORT                     1
+#endif
+#ifndef CHAP_SUPPORT
+#define CHAP_SUPPORT                    1
+#endif
+#ifndef MSCHAP_SUPPORT
+#define MSCHAP_SUPPORT                  1
+#endif
+/* EAP is optional; leave disabled by default. Uncomment to enable.
+#ifndef EAP_SUPPORT
+#define EAP_SUPPORT                     1
+#endif
+*/
+
+/* Minimal pool sizing for one PPP session over L2TP */
+#ifndef MEMP_NUM_PPP_PCB
+#define MEMP_NUM_PPP_PCB                1
+#endif
+#ifndef MEMP_NUM_PPPOL2TP_INTERFACES
+#define MEMP_NUM_PPPOL2TP_INTERFACES    1
+#endif
+
+/* Keep default MRU for L2TP unless overridden at runtime */
+#ifndef PPPOL2TP_DEFMRU
+#define PPPOL2TP_DEFMRU                 1450
+#endif
 
 #endif /* LWIP_HDR_OPT_H */

@@ -479,7 +479,7 @@ if(ZTS_ENABLE_JAVA OR (BUILD_ANDROID AND NOT ZTS_NDK_ONLY))
     set(JAVA_AWT_LIBRARY NotNeeded)
     set(JAVA_JVM_LIBRARY NotNeeded)
     set(JAVA_AWT_INCLUDE_PATH NotNeeded)
-    
+
     #
     # Do NOT make REQUIRED
     # Until there is an official way of telling CMake to skip AWT, etc.,
@@ -545,6 +545,8 @@ file(
     GLOB
     lwipSrcGlob
     ${LWIP_SRC_DIR}/netif/*.c
+    ${LWIP_SRC_DIR}/netif/ppp/*.c
+    ${LWIP_SRC_DIR}/netif/ppp/polarssl/*.c
     ${LWIP_SRC_DIR}/api/*.c
     ${LWIP_PORT_DIR}/sys_arch.c
     ${LWIP_SRC_DIR}/core/*.c
