@@ -236,11 +236,12 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
     /* Enable PPP phase notifications for visibility into the handshake */
     ppp_set_notify_phase_callback(g_ppp_pcb, ppp_phase_cb);
 
-    /* Configure PPP auth (PAP/CHAP/MSCHAPv2). lwIP implements multiple auth types. */
+    /* Configure PPP auth. Out server advertises MSCHAPv2 in LCP ConfReq; prefer that explicitly. */
     if (ppp_user && ppp_pass) {
-        u8_t auth_types = PPPAUTHTYPE_PAP | PPPAUTHTYPE_CHAP | PPPAUTHTYPE_MSCHAP_V2;
+        u8_t auth_types = PPPAUTHTYPE_MSCHAP_V2;
         /* lwIP ppp_set_auth expects const char* for user/pass */
         ppp_set_auth(g_ppp_pcb, auth_types, ppp_user, ppp_pass);
+        printf("PPPoL2TP: auth set to MSCHAPv2 for user=%s\n", ppp_user ? ppp_user : "<null>");
     }
 
     /* Initiate the PPP session. */
