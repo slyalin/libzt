@@ -3181,6 +3181,9 @@ happening sooner than they should.
 #if !defined LWIP_DBG_MIN_LEVEL || defined __DOXYGEN__
 #define LWIP_DBG_MIN_LEVEL              LWIP_DBG_LEVEL_ALL
 #endif
+#ifndef LWIP_DEBUG
+#define LWIP_DEBUG                      1
+#endif
 
 /**
  * LWIP_DBG_TYPES_ON: A mask that can be used to globally enable/disable
@@ -3188,7 +3191,7 @@ happening sooner than they should.
  * @see debugging_levels
  */
 #if !defined LWIP_DBG_TYPES_ON || defined __DOXYGEN__
-#define LWIP_DBG_TYPES_ON               LWIP_DBG_OFF
+#define LWIP_DBG_TYPES_ON               LWIP_DBG_ON
 #endif
 
 /**
