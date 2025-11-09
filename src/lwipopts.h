@@ -1809,7 +1809,7 @@ happening sooner than they should.
  * address equal to the netif IP address, looping them back up the stack.
  */
 #if !defined LWIP_NETIF_LOOPBACK || defined __DOXYGEN__
-#define LWIP_NETIF_LOOPBACK             0
+#define LWIP_NETIF_LOOPBACK             1
 #endif
 
 /**
@@ -1817,7 +1817,7 @@ happening sooner than they should.
  * sending for each netif (0 = disabled)
  */
 #if !defined LWIP_LOOPBACK_MAX_PBUFS || defined __DOXYGEN__
-#define LWIP_LOOPBACK_MAX_PBUFS         0
+#define LWIP_LOOPBACK_MAX_PBUFS         10
 #endif
 
 /**
@@ -3499,6 +3499,29 @@ happening sooner than they should.
 #define EAP_SUPPORT                     1
 #endif
 */
+
+/* PPP diagnostics */
+#ifndef PPP_NOTIFY_PHASE
+#define PPP_NOTIFY_PHASE                1
+#endif
+#ifndef PPP_DEBUG
+#define PPP_DEBUG                       LWIP_DBG_ON
+#endif
+#ifndef LCP_DEBUG
+#define LCP_DEBUG                       LWIP_DBG_ON
+#endif
+#ifndef IPCP_DEBUG
+#define IPCP_DEBUG                      LWIP_DBG_ON
+#endif
+#ifndef PAP_DEBUG
+#define PAP_DEBUG                       LWIP_DBG_ON
+#endif
+#ifndef CHAP_DEBUG
+#define CHAP_DEBUG                      LWIP_DBG_ON
+#endif
+#ifndef PPPOL2TP_DEBUG
+#define PPPOL2TP_DEBUG                  LWIP_DBG_ON
+#endif
 
 /* Minimal pool sizing for one PPP session over L2TP */
 #ifndef MEMP_NUM_PPP_PCB

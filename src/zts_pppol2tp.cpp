@@ -43,12 +43,61 @@ extern "C" {
 #include <cstring>
 #include <string>
 
+#ifndef PPPERR_CONNECT_TIMEOUT
+#ifdef PPPERR_CONNECTTIME
+#define PPPERR_CONNECT_TIMEOUT PPPERR_CONNECTTIME
+#endif
+#endif
+
 /* Static PPP context
  * We keep the PPP netif and pcb static to ensure lifetime >= process and to
  * avoid allocating from application code. Only a single PPP session is needed. */
 static struct netif g_ppp_netif;
 static ppp_pcb* g_ppp_pcb = nullptr;
 static int g_set_default_route = 0;
+
+/* Human-readable PPP phase name */
+static const char* ppp_phase_name(u8_t phase)
+{
+    switch (phase) {
+#ifdef PPP_PHASE_DEAD
+        case PPP_PHASE_DEAD: return "DEAD";
+#endif
+#ifdef PPP_PHASE_INITIALIZE
+        case PPP_PHASE_INITIALIZE: return "INITIALIZE";
+#endif
+#ifdef PPP_PHASE_ESTABLISH
+        case PPP_PHASE_ESTABLISH: return "ESTABLISH";
+#endif
+#ifdef PPP_PHASE_AUTHENTICATE
+        case PPP_PHASE_AUTHENTICATE: return "AUTHENTICATE";
+#endif
+#ifdef PPP_PHASE_CALLBACK
+        case PPP_PHASE_CALLBACK: return "CALLBACK";
+#endif
+#ifdef PPP_PHASE_NETWORK
+        case PPP_PHASE_NETWORK: return "NETWORK";
+#endif
+#ifdef PPP_PHASE_RUNNING
+        case PPP_PHASE_RUNNING: return "RUNNING";
+#endif
+#ifdef PPP_PHASE_TERMINATE
+        case PPP_PHASE_TERMINATE: return "TERMINATE";
+#endif
+#ifdef PPP_PHASE_HOLDOFF
+        case PPP_PHASE_HOLDOFF: return "HOLDOFF";
+#endif
+        default: return "UNKNOWN";
+    }
+}
+
+/* PPP phase change callback for diagnostics */
+static void ppp_phase_cb(ppp_pcb* pcb, u8_t phase, void* ctx)
+{
+    LWIP_UNUSED_ARG(pcb);
+    LWIP_UNUSED_ARG(ctx);
+    printf("PPPoL2TP: phase change %u (%s)\n", (unsigned)phase, ppp_phase_name(phase));
+}
 
 /* Simple link status callback
  * On PPPERR_NONE (link up), optionally set PPP as lwIP default route.
@@ -59,14 +108,42 @@ static void ppp_link_status_cb(ppp_pcb* pcb, int err_code, void* ctx)
     (void)ctx;
     switch (err_code) {
         case PPPERR_NONE:
+            printf("PPPoL2TP: link up\n");
+#if LWIP_IPV4
+            {
+                const ip4_addr_t* a = netif_ip4_addr(&g_ppp_netif);
+                if (a) {
+                    printf("PPPoL2TP: IPCP IPv4 %s\n", ip4addr_ntoa(a));
+                }
+            }
+#endif
             /* Link is up, set default route if requested */
             if (g_set_default_route) {
                 netif_set_default(&g_ppp_netif);
+                printf("PPPoL2TP: default route set to PPP\n");
             }
             break;
+        case PPPERR_AUTHFAIL:
+            printf("PPPoL2TP: authentication failed\n");
+            break;
+        case PPPERR_OPEN:
+            printf("PPPoL2TP: open failed\n");
+            break;
+        case PPPERR_CONNECT:
+            printf("PPPoL2TP: connection failed\n");
+            break;
+        case PPPERR_PROTOCOL:
+            printf("PPPoL2TP: protocol error (LCP/IPCP)\n");
+            break;
+        case PPPERR_CONNECT_TIMEOUT:
+            printf("PPPoL2TP: connect timeout\n");
+            break;
+        case PPPERR_USER:
+            printf("PPPoL2TP: terminated by user\n");
+            break;
         default:
-            /* Other states (down, auth failed, etc.) are intentionally left as no-ops here.
-             * The application can observe behavior via logs on the app side. */
+            /* Other states (down, etc.) */
+            printf("PPPoL2TP: link status change err=%d\n", err_code);
             break;
     }
 }
@@ -117,6 +194,7 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
     /* Underlay netif to carry the UDP L2TP transport (the ZeroTier netif). */
     struct netif* zt_netif = find_zt_netif_by_ip4(zt_bind_ip);
     if (!zt_netif) {
+        printf("PPPoL2TP: ZT netif not found for %s\n", zt_bind_ip);
         return ZTS_ERR_SERVICE;
     }
 
@@ -127,6 +205,10 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
         return ZTS_ERR_ARG;
     }
     ip_addr_copy_from_ip4(remote_ip, remote_ip4);
+    printf("PPPoL2TP: create: zt=%s:%u default_route=%d user=%s secret=%s\n",
+           zt_bind_ip, (unsigned)zt_forward_port, set_default_route,
+           (ppp_user && *ppp_user) ? "<set>" : "<none>",
+           (l2tp_secret && *l2tp_secret) ? "<set>" : "<none>");
     const u16_t remote_port = (u16_t)zt_forward_port;
 
     g_set_default_route = set_default_route ? 1 : 0;
@@ -151,6 +233,9 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
         return ZTS_ERR_SERVICE;
     }
 
+    /* Enable PPP phase notifications for visibility into the handshake */
+    ppp_set_notify_phase_callback(g_ppp_pcb, ppp_phase_cb);
+
     /* Configure PPP auth (PAP/CHAP/MSCHAPv2). lwIP implements multiple auth types. */
     if (ppp_user && ppp_pass) {
         u8_t auth_types = PPPAUTHTYPE_PAP | PPPAUTHTYPE_CHAP | PPPAUTHTYPE_MSCHAP_V2;
@@ -161,8 +246,10 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
     /* Initiate the PPP session. */
     err_t e = pppapi_connect(g_ppp_pcb, 0);
     if (e != ERR_OK) {
+        printf("PPPoL2TP: pppapi_connect failed err=%d\n", (int)e);
         return ZTS_ERR_SERVICE;
     }
+    printf("PPPoL2TP: pppapi_connect initiated\n");
     return ZTS_ERR_OK;
 #endif
 }
