@@ -44,6 +44,8 @@
 #ifndef _LWIPOPTS_H_
 #define _LWIPOPTS_H_
 
+#include <stdio.h>
+
 /*------------------------------------------------------------------------------
 ------------------------------- Config for libzt -------------------------------
 ------------------------------------------------------------------------------*/
@@ -73,11 +75,11 @@
 // TCP
 #define LWIP_TCP_KEEPALIVE              1
 #define TCP_LISTEN_BACKLOG              1
-// netif
-#define LWIP_NETIF_STATUS_CALLBACK      0
-#define LWIP_NETIF_EXT_STATUS_CALLBACK  0
-#define LWIP_NETIF_LINK_CALLBACK        0
-#define LWIP_NETIF_REMOVE_CALLBACK      0
+ // netif
+#define LWIP_NETIF_STATUS_CALLBACK      1
+#define LWIP_NETIF_EXT_STATUS_CALLBACK  1
+#define LWIP_NETIF_LINK_CALLBACK        1
+#define LWIP_NETIF_REMOVE_CALLBACK      1
 
 /*------------------------------------------------------------------------------
 ------------------------------------ Presets -----------------------------------
@@ -3183,6 +3185,14 @@ happening sooner than they should.
 #endif
 #ifndef LWIP_DEBUG
 #define LWIP_DEBUG                      1
+#endif
+
+/* Ensure lwIP debug output (PPP/LCP traces) goes to container stdout */
+#ifndef LWIP_PLATFORM_DIAG
+#define LWIP_PLATFORM_DIAG(x) do { printf(x); printf("\n"); fflush(stdout); } while(0)
+#endif
+#ifndef LWIP_PLATFORM_ASSERT
+#define LWIP_PLATFORM_ASSERT(x) do { printf("LWIP_ASSERT: %s\n", x); fflush(stdout); } while(0)
 #endif
 
 /**

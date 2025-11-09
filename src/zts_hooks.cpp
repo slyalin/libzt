@@ -6,6 +6,7 @@
  * the pbuf is consumed and not passed to lwIP.
  */
 
+#include <cstdlib>
 #include "ZeroTierSockets.h"
 
 extern "C" {

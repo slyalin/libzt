@@ -42,6 +42,7 @@ extern "C" {
 
 #include <cstring>
 #include <string>
+#include <cstdlib>
 
 #ifndef PPPERR_CONNECT_TIMEOUT
 #ifdef PPPERR_CONNECTTIME
@@ -55,6 +56,71 @@ extern "C" {
 static struct netif g_ppp_netif;
 static ppp_pcb* g_ppp_pcb = nullptr;
 static int g_set_default_route = 0;
+/* Keep stable copies of credentials for PPP lifetime */
+static std::string g_auth_user;
+static std::string g_auth_pass;
+
+/* Diagnostics helpers */
+static const char* ppp_err_str(int err_code)
+{
+    switch (err_code) {
+        case PPPERR_NONE: return "NONE";
+#ifdef PPPERR_PARAM
+        case PPPERR_PARAM: return "PARAM";
+#endif
+#ifdef PPPERR_OPEN
+        case PPPERR_OPEN: return "OPEN";
+#endif
+#ifdef PPPERR_DEVICE
+        case PPPERR_DEVICE: return "DEVICE";
+#endif
+#ifdef PPPERR_ALLOC
+        case PPPERR_ALLOC: return "ALLOC";
+#endif
+#ifdef PPPERR_USER
+        case PPPERR_USER: return "USER";
+#endif
+#ifdef PPPERR_CONNECT
+        case PPPERR_CONNECT: return "CONNECT";
+#endif
+#ifdef PPPERR_AUTHFAIL
+        case PPPERR_AUTHFAIL: return "AUTHFAIL";
+#endif
+#ifdef PPPERR_PROTOCOL
+        case PPPERR_PROTOCOL: return "PROTOCOL";
+#endif
+#ifdef PPPERR_PEERDEAD
+        case PPPERR_PEERDEAD: return "PEERDEAD";
+#endif
+#ifdef PPPERR_IDLETIMEOUT
+        case PPPERR_IDLETIMEOUT: return "IDLETIMEOUT";
+#endif
+#ifdef PPPERR_CONNECT_TIMEOUT
+        case PPPERR_CONNECT_TIMEOUT: return "CONNECT_TIMEOUT";
+#endif
+#ifdef PPPERR_LOOPBACK
+        case PPPERR_LOOPBACK: return "LOOPBACK";
+#endif
+        default: return "UNKNOWN";
+    }
+}
+
+/* Netif status callback to observe IPCP assignment */
+static void ppp_netif_status_cb(struct netif* n)
+{
+#if LWIP_IPV4
+    const ip4_addr_t* ip = netif_ip4_addr(n);
+    const ip4_addr_t* mask = netif_ip4_netmask(n);
+    const ip4_addr_t* gw = netif_ip4_gw(n);
+    printf("PPPoL2TP: netif status %c%c%u ip=%s mask=%s gw=%s\n",
+           n->name[0], n->name[1], n->num,
+           ip ? ip4addr_ntoa(ip) : "0.0.0.0",
+           mask ? ip4addr_ntoa(mask) : "0.0.0.0",
+           gw ? ip4addr_ntoa(gw) : "0.0.0.0");
+#else
+    printf("PPPoL2TP: netif status %c%c%u (IPv4 disabled)\n", n->name[0], n->name[1], n->num);
+#endif
+}
 
 /* Human-readable PPP phase name */
 static const char* ppp_phase_name(u8_t phase)
@@ -106,6 +172,7 @@ static void ppp_link_status_cb(ppp_pcb* pcb, int err_code, void* ctx)
 {
     (void)pcb;
     (void)ctx;
+    printf("PPPoL2TP: link status change err=%d (%s)\n", err_code, ppp_err_str(err_code));
     switch (err_code) {
         case PPPERR_NONE:
             printf("PPPoL2TP: link up\n");
@@ -220,10 +287,13 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
      * - secret: L2TP control secret (optional; may be NULL/0) */
     const u8_t* secret_ptr = (const u8_t*)l2tp_secret;
     u8_t secret_len = (u8_t)((l2tp_secret && *l2tp_secret) ? (u8_t)strlen(l2tp_secret) : 0);
+    if (secret_len == 0) {
+        secret_ptr = nullptr;
+    }
 
     g_ppp_pcb = pppapi_pppol2tp_create(&g_ppp_netif,
                                        zt_netif,
-                                       (ip_addr_t*)&remote_ip,
+                                       &remote_ip,
                                        remote_port,
                                        secret_ptr,
                                        secret_len,
@@ -232,17 +302,61 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
     if (!g_ppp_pcb) {
         return ZTS_ERR_SERVICE;
     }
-
-    /* Enable PPP phase notifications for visibility into the handshake */
-    ppp_set_notify_phase_callback(g_ppp_pcb, ppp_phase_cb);
-
-    /* Configure PPP auth. Out server advertises MSCHAPv2 in LCP ConfReq; prefer that explicitly. */
-    if (ppp_user && ppp_pass) {
-        u8_t auth_types = PPPAUTHTYPE_MSCHAP_V2;
-        /* lwIP ppp_set_auth expects const char* for user/pass */
-        ppp_set_auth(g_ppp_pcb, auth_types, ppp_user, ppp_pass);
-        printf("PPPoL2TP: auth set to MSCHAPv2 for user=%s\n", ppp_user ? ppp_user : "<null>");
+    {
+        char n0 = g_ppp_netif.name[0], n1 = g_ppp_netif.name[1];
+        char u0 = zt_netif->name[0], u1 = zt_netif->name[1];
+        printf("PPPoL2TP: created pcb=%p ppp_netif=%c%c%u underlay=%c%c%u\n",
+               (void*)g_ppp_pcb, n0, n1, g_ppp_netif.num, u0, u1, zt_netif->num);
     }
+
+/* Enable PPP phase notifications for visibility into the handshake */
+    ppp_set_notify_phase_callback(g_ppp_pcb, ppp_phase_cb);
+    /* Observe PPP netif status changes (IPCP up/down) */
+#if defined(LWIP_NETIF_STATUS_CALLBACK) && (LWIP_NETIF_STATUS_CALLBACK)
+    netif_set_status_callback(&g_ppp_netif, ppp_netif_status_cb);
+#else
+    /* LWIP_NETIF_STATUS_CALLBACK disabled in this build; skipping netif status callback */
+#endif
+
+    /* Configure PPP auth: allow PAP/CHAP/MSCHAPv2 (will negotiate to peer's choice) or honor L2TP_AUTH env. */
+    if (ppp_user && ppp_pass) {
+        u8_t auth_types = PPPAUTHTYPE_PAP | PPPAUTHTYPE_CHAP | PPPAUTHTYPE_MSCHAP_V2;
+        const char* auth_env = std::getenv("L2TP_AUTH");
+        if (auth_env && *auth_env) {
+            if (strcasecmp(auth_env, "pap") == 0) {
+                auth_types = PPPAUTHTYPE_PAP;
+                printf("PPPoL2TP: L2TP_AUTH=pap (forcing PAP)\n");
+            } else if (strcasecmp(auth_env, "chap") == 0) {
+                auth_types = PPPAUTHTYPE_CHAP;
+                printf("PPPoL2TP: L2TP_AUTH=chap (forcing CHAP-MD5)\n");
+            } else if (strcasecmp(auth_env, "mschapv2") == 0 || strcasecmp(auth_env, "mschap2") == 0) {
+                auth_types = PPPAUTHTYPE_MSCHAP_V2;
+                printf("PPPoL2TP: L2TP_AUTH=mschapv2 (forcing CHAP-MSCHAPv2)\n");
+            } else if (strcasecmp(auth_env, "any") == 0) {
+                auth_types = PPPAUTHTYPE_PAP | PPPAUTHTYPE_CHAP | PPPAUTHTYPE_MSCHAP_V2;
+                printf("PPPoL2TP: L2TP_AUTH=any (PAP|CHAP|MSCHAPv2)\n");
+            } else {
+                printf("PPPoL2TP: L2TP_AUTH unrecognized (%s), using default (PAP|CHAP|MSCHAPv2)\n", auth_env);
+            }
+        }
+        /* Make stable copies to ensure lifetime and avoid accidental corruption */
+        g_auth_user = ppp_user;
+        g_auth_pass = ppp_pass;
+        /* lwIP stores pointers; pass our stable buffers */
+        ppp_set_auth(g_ppp_pcb, auth_types, g_auth_user.c_str(), g_auth_pass.c_str());
+        printf("PPPoL2TP: auth set for user=%s types=0x%02x\n", g_auth_user.empty() ? "<null>" : g_auth_user.c_str(), (unsigned)auth_types);
+    }
+
+    /* Conservative LCP options to reduce negotiation mismatches */
+    ppp_set_neg_pcomp(g_ppp_pcb, 0);      /* Disable Protocol Field Compression */
+    ppp_set_neg_accomp(g_ppp_pcb, 0);     /* Disable Address/Control Compression */
+    ppp_set_neg_asyncmap(g_ppp_pcb, 1);   /* Negotiate ACCM */
+    ppp_set_asyncmap(g_ppp_pcb, 0);       /* Request ACCM = 0 for L2TP */
+
+    /* Actively initiate LCP (peer may also speak first) */
+    ppp_set_listen_time(g_ppp_pcb, 0);
+    ppp_set_passive(g_ppp_pcb, 0);
+    ppp_set_silent(g_ppp_pcb, 0);
 
     /* Initiate the PPP session. */
     err_t e = pppapi_connect(g_ppp_pcb, 0);
