@@ -2801,6 +2801,18 @@ happening sooner than they should.
 #define LWIP_HOOK_IP4_INPUT(pbuf, input_netif) zts_lwip_hook_ip4_input((pbuf),(input_netif))
 #endif
 
+#ifndef LWIP_HOOK_IP4_ROUTE
+#define LWIP_HOOK_IP4_ROUTE(dest) zts_lwip_hook_ip4_route((dest))
+#endif
+
+#ifndef LWIP_HOOK_ETHARP_GET_GW
+#define LWIP_HOOK_ETHARP_GET_GW(netif, dest) zts_lwip_hook_etharp_get_gw((netif),(dest))
+#endif
+
+#ifndef LWIP_HOOK_IP4_CANFORWARD
+#define LWIP_HOOK_IP4_CANFORWARD(p, dest) zts_lwip_hook_ip4_canforward((p),(dest))
+#endif
+
 /**
  * LWIP_HOOK_IP4_ROUTE(dest):
  * Called from ip_route() (IPv4)
