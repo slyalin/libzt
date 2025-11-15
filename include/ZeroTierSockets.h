@@ -3043,6 +3043,16 @@ ZTS_API int ZTCALL zts_core_query_route(
     uint16_t* flags,
     uint16_t* metric);
 
+ZTS_API int ZTCALL zts_core_query_route_ex(
+    uint64_t net_id,
+    unsigned int idx,
+    char* target_ip,
+    unsigned int* prefix_len,
+    char* via_ip,
+    unsigned int len,
+    uint16_t* flags,
+    uint16_t* metric);
+
 /**
  * @brief Lock the core service so that queries about addresses, routes, paths, etc. can be
  * performed.

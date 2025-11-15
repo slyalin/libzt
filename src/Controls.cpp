@@ -423,6 +423,20 @@ int zts_core_query_route(
     return zts_service->getRouteAtIdx(net_id, idx, target, via, len, flags, metric);
 }
 
+int zts_core_query_route_ex(
+    uint64_t net_id,
+    unsigned int idx,
+    char* target_ip,
+    unsigned int* prefix_len,
+    char* via_ip,
+    unsigned int len,
+    uint16_t* flags,
+    uint16_t* metric)
+{
+    ACQUIRE_SERVICE(ZTS_ERR_SERVICE);
+    return zts_service->getRouteAtIdxEx(net_id, idx, target_ip, prefix_len, via_ip, len, flags, metric);
+}
+
 int zts_core_query_path_count(uint64_t peer_id)
 {
     ACQUIRE_SERVICE(ZTS_ERR_SERVICE);

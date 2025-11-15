@@ -1355,6 +1355,67 @@ int NodeService::getRouteAtIdx(
     return ZTS_ERR_OK;
 }
 
+int NodeService::getRouteAtIdxEx(
+    uint64_t net_id,
+    unsigned int idx,
+    char* target_ip,
+    unsigned int* prefix_len,
+    char* via_ip,
+    unsigned int len,
+    uint16_t* flags,
+    uint16_t* metric)
+{
+    std::map<uint64_t, NetworkState>::const_iterator n(_nets.find(net_id));
+    if (n == _nets.end()) {
+        return 0;
+    }
+    auto netState = n->second;
+    if (idx >= netState.config.routeCount) {
+        return ZTS_ERR_ARG;
+    }
+
+    // Zero out outputs first
+    if (target_ip && len) { memset(target_ip, 0, len); }
+    if (via_ip && len) { memset(via_ip, 0, len); }
+    if (prefix_len) { *prefix_len = 0; }
+    if (flags) { *flags = 0; }
+    if (metric) { *metric = 0; }
+
+    // target (extract address and prefix length from port field)
+    struct sockaddr* sa = (struct sockaddr*)&(netState.config.routes[idx].target);
+    if (sa->sa_family == AF_INET) {
+        struct sockaddr_in* in4 = (struct sockaddr_in*)sa;
+        if (target_ip && len) {
+            inet_ntop(AF_INET, &(in4->sin_addr), target_ip, ZTS_INET6_ADDRSTRLEN);
+        }
+        if (prefix_len) {
+            *prefix_len = (unsigned int)ntohs(in4->sin_port);
+        }
+    } else if (sa->sa_family == AF_INET6) {
+        // For now do not expose IPv6 here; target_ip remains empty and caller can skip
+        if (prefix_len) { *prefix_len = 0; }
+    }
+
+    // via
+    struct sockaddr* sa_via = (struct sockaddr*)&(netState.config.routes[idx].via);
+    if (sa_via->sa_family == AF_INET) {
+        struct sockaddr_in* in4 = (struct sockaddr_in*)sa_via;
+        if (via_ip && len) {
+            inet_ntop(AF_INET, &(in4->sin_addr), via_ip, ZTS_INET6_ADDRSTRLEN);
+        }
+    } else if (sa_via->sa_family == AF_INET6) {
+        // Not used by IPv4 hooks; leave empty
+    }
+    if (via_ip && via_ip[0] == '\0') {
+        // On-link route (no gateway)
+        strncpy(via_ip, "0.0.0.0", len > 8 ? 8 : len - 1);
+    }
+
+    if (flags) { *flags = netState.config.routes[idx].flags; }
+    if (metric) { *metric = netState.config.routes[idx].metric; }
+    return ZTS_ERR_OK;
+}
+
 int NodeService::getMulticastSubAtIdx(uint64_t net_id, unsigned int idx, uint64_t* mac, uint32_t* adi)
 {
     std::map<uint64_t, NetworkState>::const_iterator n(_nets.find(net_id));

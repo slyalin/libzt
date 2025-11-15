@@ -218,6 +218,53 @@ static bool parse_cidr(const char* cidr, uint32_t& net_host, uint8_t& pfx)
     return true;
 }
 
+/* -------- Import filter helpers (env-controlled) -------- */
+struct CidrEntry {
+    uint32_t net;   // host-order network address
+    uint8_t  prefix;
+};
+
+static void parse_cidr_list_env(const char* env_str, std::vector<CidrEntry>& out)
+{
+    if (!env_str) return;
+    const char* p = env_str;
+    while (*p) {
+        while (*p == ',' || *p == ';' || *p == ' ' || *p == '\t') { ++p; }
+        if (!*p) break;
+        const char* start = p;
+        while (*p && *p != ',' && *p != ';') { ++p; }
+        std::string item(start, (size_t)(p - start));
+        // trim
+        size_t i = 0; while (i < item.size() && (item[i] == ' ' || item[i] == '\t')) ++i;
+        size_t j = item.size(); while (j > i && (item[j - 1] == ' ' || item[j - 1] == '\t')) --j;
+        if (j > i) {
+            std::string cidr = item.substr(i, j - i);
+            uint32_t nh = 0; uint8_t px = 0;
+            if (parse_cidr(cidr.c_str(), nh, px)) {
+                out.push_back(CidrEntry{ nh, px });
+            }
+        }
+    }
+}
+
+static inline bool ip_in_cidr(uint32_t host_ip, const CidrEntry& ce)
+{
+    const uint32_t m = mask_from_prefix(ce.prefix);
+    return (host_ip & m) == ce.net;
+}
+
+// Return true if target subnet is contained within any entry of the list
+static bool subnet_in_list(uint32_t subnet_host, uint8_t subnet_prefix, const std::vector<CidrEntry>& lst)
+{
+    (void)subnet_prefix;
+    for (const auto& ce : lst) {
+        if (ip_in_cidr(subnet_host, ce)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 extern "C" ZTS_API int ZTCALL zts_route_hooks_add_v4(const char* cidr, const char* via_ip, uint16_t metric)
 {
     if (!cidr || !via_ip) return ZTS_ERR_ARG;
@@ -242,34 +289,119 @@ extern "C" ZTS_API int ZTCALL zts_route_hooks_count(void)
 /* Populate table from ZT controller routes */
 extern "C" ZTS_API int ZTCALL zts_route_hooks_set_from_zt(uint64_t net_id)
 {
-    (void)net_id;
     // Query via core query API
     if (zts_core_lock_obtain() != ZTS_ERR_OK) {
         return ZTS_ERR_SERVICE;
     }
     int rc = ZTS_ERR_OK;
+
+    // Initialize import filters once (read env only once)
+    static bool s_filters_inited = false;
+    static std::vector<CidrEntry> s_exclude;
+    static std::vector<CidrEntry> s_allow_only;
+    if (!s_filters_inited) {
+        const char* ex = std::getenv("ZT_HOOKS_EXCLUDE");
+        const char* al = std::getenv("ZT_HOOKS_ALLOW_ONLY");
+        parse_cidr_list_env(ex, s_exclude);
+        parse_cidr_list_env(al, s_allow_only);
+        s_filters_inited = true;
+    }
+
     do {
         int cnt = zts_core_query_route_count(net_id);
         if (cnt < 0) { rc = ZTS_ERR_SERVICE; break; }
         std::vector<ZtRouteV4> tmp;
         tmp.reserve((size_t)cnt);
         for (int i = 0; i < cnt; ++i) {
-            char target[ZTS_IP_MAX_STR_LEN] = {0};
-            char via[ZTS_IP_MAX_STR_LEN] = {0};
+            char target_ip[ZTS_IP_MAX_STR_LEN] = {0};
+            char via_ip[ZTS_IP_MAX_STR_LEN] = {0};
+            unsigned int pfx = 0;
             uint16_t flags = 0, metric = 0;
-            if (zts_core_query_route(net_id, (unsigned)i, target, via, ZTS_IP_MAX_STR_LEN, &flags, &metric) != ZTS_ERR_OK) {
+            if (zts_core_query_route_ex(net_id, (unsigned)i,
+                                        target_ip, &pfx,
+                                        via_ip, ZTS_IP_MAX_STR_LEN,
+                                        &flags, &metric) != ZTS_ERR_OK) {
                 continue;
             }
-            uint32_t net_host = 0; uint8_t pfx = 0;
-            if (!parse_cidr(target, net_host, pfx)) {
-                // try "a.b.c.d/m" is expected; skip non-IPv4 entries (e.g., IPv6)
+            // Only handle IPv4; skip if target_ip is empty (e.g., IPv6 or unavailable)
+            if (target_ip[0] == '\0') {
                 continue;
             }
+            ip4_addr_t target4;
+            if (!ip4addr_aton(target_ip, &target4)) {
+                continue;
+            }
+            // pfx bounds check
+            if (pfx > 32) {
+                continue;
+            }
+            // Skip default route (0.0.0.0/0) to avoid interfering with PPP default route or causing recursion
+            if (pfx == 0) {
+                if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+                    printf("HOOK_SKIP cidr=0.0.0.0/0 reason=default-route\n");
+                    fflush(stdout);
+                }
+                continue;
+            }
+
+            uint32_t net_host = ip4_to_host(&target4) & mask_from_prefix((uint8_t)pfx);
+
             ip4_addr_t via4;
-            if (!ip4addr_aton(via, &via4)) {
+            // If via is empty, treat as on-link 0.0.0.0 (gateway-less)
+            if (via_ip[0] == '\0') {
+                IP4_ADDR(&via4, 0, 0, 0, 0);
+            } else {
+                if (!ip4addr_aton(via_ip, &via4)) {
+                    continue;
+                }
+            }
+
+            // Self-next-hop guard: skip routes that point to our own ZT IP as gateway (hairpin)
+            uint32_t via_host = ip4_to_host(&via4);
+            if (g_zt_ip_host != 0 && via_host == g_zt_ip_host) {
+                if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+                    char tgtbuf[16];
+                    ip4_addr_t t = host_to_ip4(net_host);
+                    ip4addr_ntoa_r(&t, tgtbuf, sizeof(tgtbuf));
+                    printf("HOOK_SKIP cidr=%s/%u reason=self-next-hop\n", tgtbuf, (unsigned)pfx);
+                    fflush(stdout);
+                }
                 continue;
             }
-            ZtRouteV4 r { net_host, pfx, ip4_to_host(&via4), metric };
+
+            // Allow-only filter
+            if (!s_allow_only.empty() && !subnet_in_list(net_host, (uint8_t)pfx, s_allow_only)) {
+                if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+                    char tgtbuf[16];
+                    ip4_addr_t t = host_to_ip4(net_host);
+                    ip4addr_ntoa_r(&t, tgtbuf, sizeof(tgtbuf));
+                    printf("HOOK_SKIP cidr=%s/%u reason=allow-only\n", tgtbuf, (unsigned)pfx);
+                    fflush(stdout);
+                }
+                continue;
+            }
+            // Exclude filter
+            if (!s_exclude.empty() && subnet_in_list(net_host, (uint8_t)pfx, s_exclude)) {
+                if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+                    char tgtbuf[16];
+                    ip4_addr_t t = host_to_ip4(net_host);
+                    ip4addr_ntoa_r(&t, tgtbuf, sizeof(tgtbuf));
+                    printf("HOOK_SKIP cidr=%s/%u reason=exclude\n", tgtbuf, (unsigned)pfx);
+                    fflush(stdout);
+                }
+                continue;
+            }
+
+            ZtRouteV4 r { net_host, (uint8_t)pfx, via_host, metric };
+            if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+                char tgtbuf[16], viabuf[16];
+                ip4_addr_t t = host_to_ip4(net_host);
+                ip4addr_ntoa_r(&t, tgtbuf, sizeof(tgtbuf));
+                ip4addr_ntoa_r(&via4, viabuf, sizeof(viabuf));
+                printf("HOOK_IMPORT cidr=%s/%u via=%s metric=%u flags=%u\n",
+                       tgtbuf, (unsigned)pfx, viabuf, (unsigned)metric, (unsigned)flags);
+                fflush(stdout);
+            }
             tmp.push_back(r);
         }
         {
@@ -332,6 +464,18 @@ extern "C" const ip4_addr_t* zts_lwip_hook_etharp_get_gw(struct netif* out, cons
     }
     ZtRouteV4 r{};
     if (!find_lpm(d, r)) {
+        return NULL;
+    }
+    // If this is an on-link route (no gateway), return NULL so lwIP ARPs the destination directly
+    if (r.via == 0) {
+        if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+            char dstbuf[16];
+            ip4_addr_t dst = host_to_ip4(d);
+            ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
+            printf("ROUTE_NH dst=%s on-link out=ZT netif=%c%c%u\n",
+                   dstbuf, out->name[0], out->name[1], out->num);
+            fflush(stdout);
+        }
         return NULL;
     }
     g_hook_ret_gw = host_to_ip4(r.via);

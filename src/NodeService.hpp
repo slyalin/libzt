@@ -356,6 +356,16 @@ class NodeService {
         uint16_t* flags,
         uint16_t* metric);
 
+    int getRouteAtIdxEx(
+        uint64_t net_id,
+        unsigned int idx,
+        char* target_ip,
+        unsigned int* prefix_len,
+        char* via_ip,
+        unsigned int len,
+        uint16_t* flags,
+        uint16_t* metric);
+
     int getMulticastSubAtIdx(uint64_t net_id, unsigned int idx, uint64_t* mac, uint32_t* adi);
 
     int getPathAtIdx(uint64_t peer_id, unsigned int idx, char* path, unsigned int len);
