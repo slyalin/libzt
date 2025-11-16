@@ -117,6 +117,8 @@ static void ppp_netif_status_cb(struct netif* n)
            ip ? ip4addr_ntoa(ip) : "0.0.0.0",
            mask ? ip4addr_ntoa(mask) : "0.0.0.0",
            gw ? ip4addr_ntoa(gw) : "0.0.0.0");
+    printf("PPPoL2TP: netif %c%c%u flags=0x%02x mtu=%u\n",
+           n->name[0], n->name[1], n->num, (unsigned)n->flags, (unsigned)n->mtu);
 #else
     printf("PPPoL2TP: netif status %c%c%u (IPv4 disabled)\n", n->name[0], n->name[1], n->num);
 #endif
@@ -307,6 +309,10 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
         char u0 = zt_netif->name[0], u1 = zt_netif->name[1];
         printf("PPPoL2TP: created pcb=%p ppp_netif=%c%c%u underlay=%c%c%u\n",
                (void*)g_ppp_pcb, n0, n1, g_ppp_netif.num, u0, u1, zt_netif->num);
+        printf("PPPoL2TP: underlay if=%c%c%u flags=0x%02x mtu=%u\n",
+               u0, u1, zt_netif->num, (unsigned)zt_netif->flags, (unsigned)zt_netif->mtu);
+        printf("PPPoL2TP: ppp_netif if=%c%c%u flags=0x%02x mtu=%u\n",
+               n0, n1, g_ppp_netif.num, (unsigned)g_ppp_netif.flags, (unsigned)g_ppp_netif.mtu);
     }
 
 /* Enable PPP phase notifications for visibility into the handshake */

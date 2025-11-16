@@ -3220,7 +3220,7 @@ happening sooner than they should.
  * ETHARP_DEBUG: Enable debugging in etharp.c.
  */
 #if !defined ETHARP_DEBUG || defined __DOXYGEN__
-#define ETHARP_DEBUG                    LWIP_DBG_OFF
+#define ETHARP_DEBUG                    LWIP_DBG_ON
 #endif
 
 /**
@@ -3283,7 +3283,7 @@ happening sooner than they should.
  * IP_DEBUG: Enable debugging for IP.
  */
 #if !defined IP_DEBUG || defined __DOXYGEN__
-#define IP_DEBUG                        LWIP_DBG_OFF
+#define IP_DEBUG                        LWIP_DBG_ON
 #endif
 
 /**

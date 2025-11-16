@@ -24,6 +24,21 @@ static uint32_t g_zt_ip_host = 0;
 
 static zts_ip4_filter_cb g_ip4_filter_cb = nullptr;
 
+/* Diagnostics: track recent pbufs seen in ip4_canforward to detect re-entry */
+static void* g_fwd_pbuf_ring[64];
+static unsigned g_fwd_pbuf_idx = 0;
+static inline void diag_record_fwd_pbuf(void* p)
+{
+    g_fwd_pbuf_ring[g_fwd_pbuf_idx++ & 63] = p;
+}
+static inline int diag_seen_in_fwd(void* p)
+{
+    for (unsigned i = 0; i < 64; ++i) {
+        if (g_fwd_pbuf_ring[i] == p) return 1;
+    }
+    return 0;
+}
+
 extern "C" ZTS_API int ZTCALL zts_set_ip4_input_filter(zts_ip4_filter_cb cb)
 {
     g_ip4_filter_cb = cb;
@@ -36,27 +51,38 @@ extern "C" int zts_lwip_hook_ip4_input(struct pbuf* p, struct netif* input_netif
         return 0;
     }
 
-    // If packet diagnostics are enabled and this packet arrived on the ZT netif, log basic header info
-    if (g_pkt_diag.load(std::memory_order_relaxed) != 0 && g_zt_ip_host != 0 && input_netif) {
-        struct netif* zt = find_netif_by_ip4_host(g_zt_ip_host);
-        if (zt && input_netif == zt) {
-            // Peek first 20 bytes (IPv4 header min)
-            uint8_t hdr[20];
-            u16_t copied_hdr = pbuf_copy_partial(p, hdr, sizeof(hdr), 0);
-            if (copied_hdr >= 20 && (hdr[0] >> 4) == 4) {
-                uint8_t ihl = (uint8_t)((hdr[0] & 0x0F) * 4);
-                uint8_t proto = hdr[9];
-                ip4_addr_t src, dst;
-                IP4_ADDR(&src, hdr[12], hdr[13], hdr[14], hdr[15]);
-                IP4_ADDR(&dst, hdr[16], hdr[17], hdr[18], hdr[19]);
-                char srcbuf[16], dstbuf[16];
-                ip4addr_ntoa_r(&src, srcbuf, sizeof(srcbuf));
-                ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
-                printf("ZT_PKT_IN netif=%c%c%u len=%u proto=%u src=%s dst=%s\n",
-                       input_netif->name[0], input_netif->name[1], input_netif->num,
-                       (unsigned)p->tot_len, (unsigned)proto, srcbuf, dstbuf);
-                fflush(stdout);
-            }
+    // Packet diagnostics for any input netif (ZT or PPP): log IPv4 header summary
+    if (g_pkt_diag.load(std::memory_order_relaxed) != 0 && input_netif) {
+        if (diag_seen_in_fwd((void*)p)) {
+            printf("IP4_IN_REENTRY p=%p (previously seen in forward path)\n", (void*)p);
+            fflush(stdout);
+        }
+        struct netif* zt = NULL;
+        if (g_zt_ip_host != 0) { zt = find_netif_by_ip4_host(g_zt_ip_host); }
+        uint8_t hdr[40];
+        u16_t copied_hdr = pbuf_copy_partial(p, hdr, sizeof(hdr), 0);
+        if (copied_hdr >= 20 && (hdr[0] >> 4) == 4) {
+            uint8_t ihl = (uint8_t)((hdr[0] & 0x0F) * 4);
+            uint8_t proto = hdr[9];
+            uint8_t ttl = hdr[8];
+            ip4_addr_t src, dst;
+            IP4_ADDR(&src, hdr[12], hdr[13], hdr[14], hdr[15]);
+            IP4_ADDR(&dst, hdr[16], hdr[17], hdr[18], hdr[19]);
+            char srcbuf[16], dstbuf[16];
+            ip4addr_ntoa_r(&src, srcbuf, sizeof(srcbuf));
+            ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
+            int is_zt = (zt && input_netif == zt) ? 1 : 0;
+            printf("IP4_IN netif=%c%c%u isZT=%d flags=0x%02x mtu=%u len=%u proto=%u ttl=%u src=%s dst=%s p=%p next=%p\n",
+                   input_netif->name[0], input_netif->name[1], input_netif->num, is_zt,
+                   (unsigned)input_netif->flags, (unsigned)input_netif->mtu,
+                   (unsigned)p->tot_len, (unsigned)proto, (unsigned)ttl,
+                   srcbuf, dstbuf, (void*)p, (void*)p->next);
+            /* Hexdump first bytes */
+            printf("IP4_IN_HEX:");
+            u16_t dumpn = (copied_hdr > 40) ? 40 : copied_hdr;
+            for (u16_t i = 0; i < dumpn; ++i) { printf(" %02x", (unsigned)(hdr[i] & 0xff)); }
+            printf("\n");
+            fflush(stdout);
         }
     }
 
@@ -148,7 +174,29 @@ static struct netif* find_netif_by_ip4_host(uint32_t ip_host)
         }
 #endif
     }
-    /* fallback */
+    /* No exact match found: fall back to netif_default. Log inventory to aid diagnostics. */
+    if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+        char wantbuf[16];
+        ip4addr_ntoa_r(&want, wantbuf, sizeof(wantbuf));
+        printf("HOOK_WARN no exact netif match for %s; falling back to netif_default; netifs:", wantbuf);
+        for (struct netif* n = netif_list; n; n = n->next) {
+#if LWIP_IPV4
+            const ip4_addr_t* nip = netif_ip4_addr(n);
+            char ipbuf[16];
+            if (nip) {
+                ip4addr_ntoa_r(nip, ipbuf, sizeof(ipbuf));
+            } else {
+                strncpy(ipbuf, "0.0.0.0", sizeof(ipbuf));
+                ipbuf[sizeof(ipbuf)-1] = '\0';
+            }
+            printf(" %c%c%u=%s", n->name[0], n->name[1], n->num, ipbuf);
+#else
+            printf(" %c%c%u", n->name[0], n->name[1], n->num);
+#endif
+        }
+        printf("\n");
+        fflush(stdout);
+    }
     return netif_default;
 }
 
@@ -299,11 +347,14 @@ extern "C" ZTS_API int ZTCALL zts_route_hooks_set_from_zt(uint64_t net_id)
     static bool s_filters_inited = false;
     static std::vector<CidrEntry> s_exclude;
     static std::vector<CidrEntry> s_allow_only;
+    static int s_force_onlink = 0;
     if (!s_filters_inited) {
         const char* ex = std::getenv("ZT_HOOKS_EXCLUDE");
         const char* al = std::getenv("ZT_HOOKS_ALLOW_ONLY");
+        const char* fo = std::getenv("ZT_HOOKS_FORCE_ONLINK");
         parse_cidr_list_env(ex, s_exclude);
         parse_cidr_list_env(al, s_allow_only);
+        s_force_onlink = (fo && (*fo=='1' || *fo=='t' || *fo=='T' || *fo=='y' || *fo=='Y')) ? 1 : 0;
         s_filters_inited = true;
     }
 
@@ -392,6 +443,9 @@ extern "C" ZTS_API int ZTCALL zts_route_hooks_set_from_zt(uint64_t net_id)
                 continue;
             }
 
+            if (s_force_onlink) {
+                via_host = 0; // force on-link next-hop for all imported routes
+            }
             ZtRouteV4 r { net_host, (uint8_t)pfx, via_host, metric };
             if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
                 char tgtbuf[16], viabuf[16];
@@ -433,6 +487,16 @@ extern "C" struct netif* zts_lwip_hook_ip4_route(const ip4_addr_t* dest)
         return NULL; // ZT netif unknown; do not override
     }
     struct netif* zt = find_netif_by_ip4_host(g_zt_ip_host);
+    if (!zt) {
+        if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+            char dstbuf[16];
+            ip4_addr_t dst = host_to_ip4(d);
+            ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
+            printf("ROUTE_NOZT dst=%s/%u (no netif found; returning NULL to let lwIP decide)\n", dstbuf, (unsigned)r.prefix);
+            fflush(stdout);
+        }
+        return NULL;
+    }
     if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
         char dstbuf[16];
         ip4_addr_t dst = host_to_ip4(d);
@@ -440,6 +504,24 @@ extern "C" struct netif* zts_lwip_hook_ip4_route(const ip4_addr_t* dest)
         printf("ROUTE_MATCH dst=%s/%u -> out=ZT netif=%c%c%u\n",
                dstbuf, (unsigned)r.prefix,
                zt ? zt->name[0] : '?', zt ? zt->name[1] : '?', zt ? zt->num : 0);
+        /* Extra diagnostics: flags, mtu, output/linkoutput pointers and route via */
+        char netbuf[16], viabuf[16];
+        ip4_addr_t netip = host_to_ip4(r.net);
+        ip4_addr_t viaip = host_to_ip4(r.via);
+        ip4addr_ntoa_r(&netip, netbuf, sizeof(netbuf));
+        ip4addr_ntoa_r(&viaip, viabuf, sizeof(viabuf));
+        printf("HOOK_ROUTE_DECISION net=%s/%u via=%s if=%c%c%u flags=0x%02x mtu=%u output=%p linkoutput=%p\n",
+               netbuf, (unsigned)r.prefix, (r.via==0)?"0.0.0.0":viabuf,
+               zt->name[0], zt->name[1], zt->num,
+               (unsigned)zt->flags, (unsigned)zt->mtu,
+               (void*)zt->output, (void*)zt->linkoutput);
+        /* ZT iface IPv4/mask snapshot */
+        const ip4_addr_t* ztip = netif_ip4_addr(zt);
+        const ip4_addr_t* ztm = netif_ip4_netmask(zt);
+        char ztipbuf[16] = "0.0.0.0", ztmaskbuf[16] = "0.0.0.0";
+        if (ztip) ip4addr_ntoa_r(ztip, ztipbuf, sizeof(ztipbuf));
+        if (ztm) ip4addr_ntoa_r(ztm, ztmaskbuf, sizeof(ztmaskbuf));
+        printf("HOOK_ZT_IFACE ip=%s mask=%s\n", ztipbuf, ztmaskbuf);
         fflush(stdout);
     }
     return zt;
@@ -455,40 +537,23 @@ extern "C" const ip4_addr_t* zts_lwip_hook_etharp_get_gw(struct netif* out, cons
     if (g_zt_ip_host == 0) return NULL;
     struct netif* zt = find_netif_by_ip4_host(g_zt_ip_host);
     if (out != zt) {
-        return NULL; // only override for ZT egress
+        return NULL; // only applies for ZT egress
     }
-    uint32_t d = ip4_to_host(dest);
-    // Do not supply a gateway for traffic addressed to ourselves (on-link local)
-    if (d == g_zt_ip_host) {
-        return NULL;
-    }
-    ZtRouteV4 r{};
-    if (!find_lpm(d, r)) {
-        return NULL;
-    }
-    // If this is an on-link route (no gateway), return NULL so lwIP ARPs the destination directly
-    if (r.via == 0) {
-        if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
-            char dstbuf[16];
-            ip4_addr_t dst = host_to_ip4(d);
-            ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
-            printf("ROUTE_NH dst=%s on-link out=ZT netif=%c%c%u\n",
-                   dstbuf, out->name[0], out->name[1], out->num);
-            fflush(stdout);
-        }
-        return NULL;
-    }
-    g_hook_ret_gw = host_to_ip4(r.via);
+    // As a safety measure, disable ETHARP gateway override for ZT. Always return NULL so lwIP treats dest as on-link.
     if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
-        char dstbuf[16], viabuf[16];
-        ip4_addr_t dst = host_to_ip4(d);
-        ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
-        ip4addr_ntoa_r(&g_hook_ret_gw, viabuf, sizeof(viabuf));
-        printf("ROUTE_NH dst=%s via=%s out=ZT netif=%c%c%u\n",
-               dstbuf, viabuf, out->name[0], out->name[1], out->num);
+        char dstbuf[16];
+        ip4_addr_t d = *dest;
+        ip4addr_ntoa_r(&d, dstbuf, sizeof(dstbuf));
+        const ip4_addr_t* out_ip = netif_ip4_addr(out);
+        const ip4_addr_t* out_nm = netif_ip4_netmask(out);
+        char outip[16] = "0.0.0.0", outmask[16] = "0.0.0.0";
+        if (out_ip) ip4addr_ntoa_r(out_ip, outip, sizeof(outip));
+        if (out_nm) ip4addr_ntoa_r(out_nm, outmask, sizeof(outmask));
+        printf("HOOK_GW_DISABLED out=%c%c%u flags=0x%02x mtu=%u dest=%s out_ip=%s mask=%s\n",
+               out->name[0], out->name[1], out->num, (unsigned)out->flags, (unsigned)out->mtu, dstbuf, outip, outmask);
         fflush(stdout);
     }
-    return &g_hook_ret_gw;
+    return NULL;
 }
 
 /* lwIP hook: called during ip4_forward path to decide whether a packet can be forwarded.
@@ -496,16 +561,58 @@ extern "C" const ip4_addr_t* zts_lwip_hook_etharp_get_gw(struct netif* out, cons
 extern "C" int zts_lwip_hook_ip4_canforward(struct pbuf* p, u32_t dest_addr_hostorder)
 {
     LWIP_UNUSED_ARG(p);
-    if (g_pkt_diag.load(std::memory_order_relaxed) == 0) {
-        return -1; // no decision, continue normal
+    static int s_drop_ppp_fwd = -2; // -2=uninit, -1=off, 1=on
+    if (s_drop_ppp_fwd == -2) {
+        const char* dp = std::getenv("ZT_HOOKS_DROP_PPP_FWD");
+        s_drop_ppp_fwd = (dp && (*dp=='1' || *dp=='t' || *dp=='T' || *dp=='y' || *dp=='Y')) ? 1 : -1;
     }
     uint32_t d = (uint32_t)dest_addr_hostorder;
-    // If forwarding towards ZT per our route table, emit a concise log
+    // If forwarding towards ZT per our route table, we may gate forwarding to isolate PPP->ZT path
     ZtRouteV4 r{};
     if (find_lpm(d, r)) {
+        if (s_drop_ppp_fwd == 1) {
+            extern struct netif* netif_default;
+            struct netif* zt = NULL;
+            if (g_zt_ip_host != 0) { zt = find_netif_by_ip4_host(g_zt_ip_host); }
+            if (netif_default && false /*it should be triggered for p2p lwIP configs, but ZT doesn't provide this mode*/ && zt) {
+                if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+                    char dstbuf[16]; ip4_addr_t dst = host_to_ip4(d);
+                    ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
+                    printf("HOOK_FWD_DROP dst=%s reason=PPP->ZT gating netif_default=%c%c%u zt=%c%c%u\n",
+                           dstbuf, netif_default->name[0], netif_default->name[1], netif_default->num,
+                           zt->name[0], zt->name[1], zt->num);
+                    fflush(stdout);
+                }
+                return 0; // do not forward
+            }
+        }
+        if (g_pkt_diag.load(std::memory_order_relaxed) == 0) {
+            return -1;
+        }
+        // Extra: log forward decision context
+        if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+            struct netif* zt = NULL;
+            if (g_zt_ip_host != 0) { zt = find_netif_by_ip4_host(g_zt_ip_host); }
+            char netbuf[16], viabuf[16];
+            ip4_addr_t netip = host_to_ip4(r.net);
+            ip4_addr_t viaip = host_to_ip4(r.via);
+            ip4addr_ntoa_r(&netip, netbuf, sizeof(netbuf));
+            ip4addr_ntoa_r(&viaip, viabuf, sizeof(viabuf));
+            extern struct netif* netif_default;
+            printf("HOOK_FWD_DECISION route=%s/%u via=%s if=%c%c%u flags=0x%02x mtu=%u output=%p linkoutput=%p netif_default=%p(%c%c%u)\n",
+                   netbuf, (unsigned)r.prefix, (r.via==0)?"0.0.0.0":viabuf,
+                   zt?zt->name[0]:'?', zt?zt->name[1]:'?', zt?zt->num:0,
+                   zt?(unsigned)zt->flags:0, zt?(unsigned)zt->mtu:0,
+                   zt?(void*)zt->output:NULL, zt?(void*)zt->linkoutput:NULL,
+                   (void*)netif_default,
+                   netif_default?netif_default->name[0]:'?', netif_default?netif_default->name[1]:'?', netif_default?netif_default->num:0);
+            fflush(stdout);
+        }
         // Try to peek header for proto/src for better context
         if (p && p->tot_len >= 20) {
-            uint8_t hdr[20];
+            /* Record pbuf pointer for re-entry diagnostics */
+            diag_record_fwd_pbuf((void*)p);
+            uint8_t hdr[40];
             u16_t copied_hdr = pbuf_copy_partial(p, hdr, sizeof(hdr), 0);
             if (copied_hdr >= 20 && (hdr[0] >> 4) == 4) {
                 uint8_t proto = hdr[9];
@@ -517,8 +624,13 @@ extern "C" int zts_lwip_hook_ip4_canforward(struct pbuf* p, u32_t dest_addr_host
                 ip4addr_ntoa_r(&src, srcbuf, sizeof(srcbuf));
                 ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
                 ip4addr_ntoa_r(&via, viabuf, sizeof(viabuf));
-                printf("ZT_PKT_OUT len=%u proto=%u src=%s dst=%s via=%s\n",
-                       (unsigned)p->tot_len, (unsigned)proto, srcbuf, dstbuf, viabuf);
+                printf("ZT_PKT_OUT len=%u proto=%u src=%s dst=%s via=%s p=%p next=%p\n",
+                       (unsigned)p->tot_len, (unsigned)proto, srcbuf, dstbuf, viabuf, (void*)p, (void*)p->next);
+                /* Hexdump first bytes */
+                u16_t dumpn = (copied_hdr > 40) ? 40 : copied_hdr;
+                printf("ZT_PKT_OUT_HEX:");
+                for (u16_t i = 0; i < dumpn; ++i) { printf(" %02x", (unsigned)(hdr[i] & 0xff)); }
+                printf("\n");
                 fflush(stdout);
             }
         } else {
