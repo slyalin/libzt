@@ -637,7 +637,7 @@ extern "C" const ip4_addr_t* zts_lwip_hook_etharp_get_gw(struct netif* out, cons
 
 /* lwIP hook: called during ip4_forward path to decide whether a packet can be forwarded.
    We use this hook for diagnostics only and do not alter forwarding (return -1). */
-extern "C" int zts_lwip_hook_ip4_canforward(struct pbuf* p, u32_t dest_addr_hostorder)
+extern "C" int zts_lwip_hook_ip4_canforward(struct pbuf* p, unsigned long dest_addr_hostorder)
 {
     LWIP_UNUSED_ARG(p);
     static int s_drop_ppp_fwd = -2; // -2=uninit, -1=off, 1=on

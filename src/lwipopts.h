@@ -2662,6 +2662,20 @@ happening sooner than they should.
    ---------------------------------------
 */
 
+/* Ensure C sees proper prototypes for hook functions to avoid default-int pointer truncation */
+#ifdef __cplusplus
+extern "C" {
+#endif
+struct pbuf; struct netif; struct ip4_addr;
+/* zts_* hook prototypes used by LWIP_HOOK_* macros below */
+int zts_lwip_hook_ip4_input(struct pbuf* pbuf, struct netif* input_netif);
+struct netif* zts_lwip_hook_ip4_route(const struct ip4_addr* dest);
+const struct ip4_addr* zts_lwip_hook_etharp_get_gw(struct netif* netif, const struct ip4_addr* dest);
+int zts_lwip_hook_ip4_canforward(struct pbuf* p, unsigned long dest_addr_hostorder);
+#ifdef __cplusplus
+}
+#endif
+
 /**
  * @defgroup lwip_opts_hooks Hooks
  * @ingroup lwip_opts_infrastructure
