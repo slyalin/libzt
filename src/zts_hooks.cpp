@@ -618,18 +618,36 @@ extern "C" const ip4_addr_t* zts_lwip_hook_etharp_get_gw(struct netif* out, cons
     if (out != zt) {
         return NULL; // only applies for ZT egress
     }
-    // As a safety measure, disable ETHARP gateway override for ZT. Always return NULL so lwIP treats dest as on-link.
+
+    // For off-link destinations with a controller/static route, return its next-hop (via)
+    uint32_t d = ip4_to_host(dest);
+    ZtRouteV4 r{};
+    if (find_lpm(d, r) && r.via != 0) {
+        g_hook_ret_gw = host_to_ip4(r.via);
+        if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
+            char dstbuf[16], viabuf[16];
+            ip4_addr_t dst = host_to_ip4(d);
+            ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
+            ip4addr_ntoa_r(&g_hook_ret_gw, viabuf, sizeof(viabuf));
+            const ip4_addr_t* out_ip = netif_ip4_addr(out);
+            const ip4_addr_t* out_nm = netif_ip4_netmask(out);
+            char outip[16] = "0.0.0.0", outmask[16] = "0.0.0.0";
+            if (out_ip) ip4addr_ntoa_r(out_ip, outip, sizeof(outip));
+            if (out_nm) ip4addr_ntoa_r(out_nm, outmask, sizeof(outmask));
+            printf("HOOK_GW_DECISION out=%c%c%u flags=0x%02x mtu=%u dest=%s via=%s out_ip=%s mask=%s\n",
+                   out->name[0], out->name[1], out->num, (unsigned)out->flags, (unsigned)out->mtu, dstbuf, viabuf, outip, outmask);
+            fflush(stdout);
+        }
+        return &g_hook_ret_gw;
+    }
+
+    // Treat as on-link when no via is provided
     if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
         char dstbuf[16];
-        ip4_addr_t d = *dest;
-        ip4addr_ntoa_r(&d, dstbuf, sizeof(dstbuf));
-        const ip4_addr_t* out_ip = netif_ip4_addr(out);
-        const ip4_addr_t* out_nm = netif_ip4_netmask(out);
-        char outip[16] = "0.0.0.0", outmask[16] = "0.0.0.0";
-        if (out_ip) ip4addr_ntoa_r(out_ip, outip, sizeof(outip));
-        if (out_nm) ip4addr_ntoa_r(out_nm, outmask, sizeof(outmask));
-        printf("HOOK_GW_DISABLED out=%c%c%u flags=0x%02x mtu=%u dest=%s out_ip=%s mask=%s\n",
-               out->name[0], out->name[1], out->num, (unsigned)out->flags, (unsigned)out->mtu, dstbuf, outip, outmask);
+        ip4_addr_t d4 = host_to_ip4(d);
+        ip4addr_ntoa_r(&d4, dstbuf, sizeof(dstbuf));
+        printf("HOOK_GW_ONLINK out=%c%c%u flags=0x%02x mtu=%u dest=%s (no via)\n",
+               out->name[0], out->name[1], out->num, (unsigned)out->flags, (unsigned)out->mtu, dstbuf);
         fflush(stdout);
     }
     return NULL;
