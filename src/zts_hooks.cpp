@@ -53,6 +53,45 @@ extern "C" int zts_lwip_hook_ip4_input(struct pbuf* p, struct netif* input_netif
 
     // Packet diagnostics for any input netif (ZT or PPP): log IPv4 header summary
     if (g_pkt_diag.load(std::memory_order_relaxed) != 0 && input_netif) {
+        /* Diagnostics: pbuf and netif snapshot */
+        printf("PBUF_IN p=%p payload=%p len=%u tot_len=%u flags=0x%02x ref=%u next=%p\n",
+               (void*)p, p ? p->payload : NULL,
+               (unsigned)(p ? p->len : 0), (unsigned)(p ? p->tot_len : 0),
+               (unsigned)(p ? p->flags : 0),
+               (unsigned)(p ? p->ref : 0), (void*)(p ? p->next : NULL));
+        printf("NETIF_IN ptr=%p name=%c%c%u flags=0x%02x mtu=%u input=%p output=%p linkoutput=%p state=%p\n",
+               (void*)input_netif,
+               input_netif->name[0], input_netif->name[1], input_netif->num,
+               (unsigned)input_netif->flags, (unsigned)input_netif->mtu,
+               (void*)input_netif->input, (void*)input_netif->output, (void*)input_netif->linkoutput,
+               (void*)input_netif->state);
+        static int s_dumped_netifs = 0;
+        if (!s_dumped_netifs) {
+            s_dumped_netifs = 1;
+            printf("NETIF_INVENTORY begin\n");
+            for (struct netif* n = netif_list; n; n = n->next) {
+#if LWIP_IPV4
+                const ip4_addr_t* nip = netif_ip4_addr(n);
+                const ip4_addr_t* nmask = netif_ip4_netmask(n);
+                const ip4_addr_t* ngw = netif_ip4_gw(n);
+                char ipb[16]="0.0.0.0", mb[16]="0.0.0.0", gwb[16]="0.0.0.0";
+                if (nip) ip4addr_ntoa_r(nip, ipb, sizeof(ipb));
+                if (nmask) ip4addr_ntoa_r(nmask, mb, sizeof(mb));
+                if (ngw) ip4addr_ntoa_r(ngw, gwb, sizeof(gwb));
+                printf("  NETIF %p %c%c%u flags=0x%02x mtu=%u ip=%s mask=%s gw=%s input=%p output=%p linkoutput=%p state=%p\n",
+                       (void*)n, n->name[0], n->name[1], n->num,
+                       (unsigned)n->flags, (unsigned)n->mtu,
+                       ipb, mb, gwb,
+                       (void*)n->input, (void*)n->output, (void*)n->linkoutput, (void*)n->state);
+#else
+                printf("  NETIF %p %c%c%u flags=0x%02x mtu=%u input=%p output=%p linkoutput=%p state=%p\n",
+                       (void*)n, n->name[0], n->name[1], n->num,
+                       (unsigned)n->flags, (unsigned)n->mtu,
+                       (void*)n->input, (void*)n->output, (void*)n->linkoutput, (void*)n->state);
+#endif
+            }
+            printf("NETIF_INVENTORY end\n");
+        }
         if (diag_seen_in_fwd((void*)p)) {
             printf("IP4_IN_REENTRY p=%p (previously seen in forward path)\n", (void*)p);
             fflush(stdout);
@@ -198,6 +237,37 @@ static struct netif* find_netif_by_ip4_host(uint32_t ip_host)
         fflush(stdout);
     }
     return netif_default;
+}
+
+/* Diagnostics helper: dump current netif list on demand */
+extern "C" ZTS_API int ZTCALL zts_diag_dump_netifs(const char* tag)
+{
+    const char* hdr = tag && *tag ? tag : "NETIF_INVENTORY";
+    printf("%s begin\n", hdr);
+    for (struct netif* n = netif_list; n; n = n->next) {
+#if LWIP_IPV4
+        const ip4_addr_t* nip = netif_ip4_addr(n);
+        const ip4_addr_t* nmask = netif_ip4_netmask(n);
+        const ip4_addr_t* ngw = netif_ip4_gw(n);
+        char ipb[16]="0.0.0.0", mb[16]="0.0.0.0", gwb[16]="0.0.0.0";
+        if (nip) ip4addr_ntoa_r(nip, ipb, sizeof(ipb));
+        if (nmask) ip4addr_ntoa_r(nmask, mb, sizeof(mb));
+        if (ngw) ip4addr_ntoa_r(ngw, gwb, sizeof(gwb));
+        printf("  NETIF %p %c%c%u flags=0x%02x mtu=%u ip=%s mask=%s gw=%s input=%p output=%p linkoutput=%p state=%p\n",
+               (void*)n, n->name[0], n->name[1], n->num,
+               (unsigned)n->flags, (unsigned)n->mtu,
+               ipb, mb, gwb,
+               (void*)n->input, (void*)n->output, (void*)n->linkoutput, (void*)n->state);
+#else
+        printf("  NETIF %p %c%c%u flags=0x%02x mtu=%u input=%p output=%p linkoutput=%p state=%p\n",
+               (void*)n, n->name[0], n->name[1], n->num,
+               (unsigned)n->flags, (unsigned)n->mtu,
+               (void*)n->input, (void*)n->output, (void*)n->linkoutput, (void*)n->state);
+#endif
+    }
+    printf("%s end\n", hdr);
+    fflush(stdout);
+    return ZTS_ERR_OK;
 }
 
 /* Longest-prefix match */
@@ -522,6 +592,15 @@ extern "C" struct netif* zts_lwip_hook_ip4_route(const ip4_addr_t* dest)
         if (ztip) ip4addr_ntoa_r(ztip, ztipbuf, sizeof(ztipbuf));
         if (ztm) ip4addr_ntoa_r(ztm, ztmaskbuf, sizeof(ztmaskbuf));
         printf("HOOK_ZT_IFACE ip=%s mask=%s\n", ztipbuf, ztmaskbuf);
+        /* Extra: netif_default pointer and gateway of ZT netif */
+        extern struct netif* netif_default;
+        const ip4_addr_t* ztgw = netif_ip4_gw(zt);
+        char ztgwbuf[16] = "0.0.0.0";
+        if (ztgw) ip4addr_ntoa_r(ztgw, ztgwbuf, sizeof(ztgwbuf));
+        printf("HOOK_NETIF_CTX zt_ptr=%p netif_default=%p(%c%c%u) output=%p linkoutput=%p gw=%s state=%p\n",
+               (void*)zt, (void*)netif_default,
+               netif_default?netif_default->name[0]:'?', netif_default?netif_default->name[1]:'?', netif_default?netif_default->num:0,
+               (void*)zt->output, (void*)zt->linkoutput, ztgwbuf, (void*)zt->state);
         fflush(stdout);
     }
     return zt;
@@ -610,6 +689,12 @@ extern "C" int zts_lwip_hook_ip4_canforward(struct pbuf* p, u32_t dest_addr_host
         }
         // Try to peek header for proto/src for better context
         if (p && p->tot_len >= 20) {
+            /* pbuf snapshot */
+            printf("PBUF_FWD p=%p payload=%p len=%u tot_len=%u flags=0x%02x ref=%u next=%p\n",
+                   (void*)p, p ? p->payload : NULL,
+                   (unsigned)(p ? p->len : 0), (unsigned)(p ? p->tot_len : 0),
+                   (unsigned)(p ? p->flags : 0),
+                   (unsigned)(p ? p->ref : 0), (void*)(p ? p->next : NULL));
             /* Record pbuf pointer for re-entry diagnostics */
             diag_record_fwd_pbuf((void*)p);
             uint8_t hdr[40];

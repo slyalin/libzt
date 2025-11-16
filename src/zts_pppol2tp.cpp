@@ -40,6 +40,9 @@ extern "C" {
 #include "netif/ppp/pppol2tp.h"
 }
 
+/* Diagnostics: on-demand dump of netif inventory (declared in zts_hooks.cpp) */
+extern "C" int zts_diag_dump_netifs(const char* tag);
+
 #include <cstring>
 #include <string>
 #include <cstdlib>
@@ -165,6 +168,12 @@ static void ppp_phase_cb(ppp_pcb* pcb, u8_t phase, void* ctx)
     LWIP_UNUSED_ARG(pcb);
     LWIP_UNUSED_ARG(ctx);
     printf("PPPoL2TP: phase change %u (%s)\n", (unsigned)phase, ppp_phase_name(phase));
+#ifdef PPP_PHASE_RUNNING
+    if (phase == PPP_PHASE_RUNNING) {
+        /* Dump netifs after PPP is fully up to observe post-PPPoL2TP state */
+        zts_diag_dump_netifs("NETIF_INVENTORY_PPP_RUNNING");
+    }
+#endif
 }
 
 /* Simple link status callback
@@ -190,6 +199,8 @@ static void ppp_link_status_cb(ppp_pcb* pcb, int err_code, void* ctx)
             if (g_set_default_route) {
                 netif_set_default(&g_ppp_netif);
                 printf("PPPoL2TP: default route set to PPP\n");
+                /* Snapshot netifs immediately after making PPP default */
+                zts_diag_dump_netifs("NETIF_INVENTORY_AFTER_PPP_LINKUP");
             }
             break;
         case PPPERR_AUTHFAIL:
