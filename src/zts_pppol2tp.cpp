@@ -46,6 +46,7 @@ extern "C" int zts_diag_dump_netifs(const char* tag);
 #include <cstring>
 #include <string>
 #include <cstdlib>
+#include <atomic>
 
 #ifndef PPPERR_CONNECT_TIMEOUT
 #ifdef PPPERR_CONNECTTIME
@@ -62,6 +63,8 @@ static int g_set_default_route = 0;
 /* Keep stable copies of credentials for PPP lifetime */
 static std::string g_auth_user;
 static std::string g_auth_pass;
+static int g_reconnect_secs = 10;
+static std::atomic<int> g_force_reconnect_on_user{0};
 
 /* Diagnostics helpers */
 static const char* ppp_err_str(int err_code)
@@ -226,6 +229,23 @@ static void ppp_link_status_cb(ppp_pcb* pcb, int err_code, void* ctx)
             printf("PPPoL2TP: link status change err=%d\n", err_code);
             break;
     }
+    /* Intentional close via watchdog: reconnect too */
+    if (err_code == PPPERR_USER && g_force_reconnect_on_user.load()) {
+        printf("PPPoL2TP: USER close (watchdog), scheduling reconnect in %d sec\n", g_reconnect_secs);
+        g_force_reconnect_on_user.store(0);
+        if (g_ppp_pcb) {
+            ppp_connect(g_ppp_pcb, (u16_t)g_reconnect_secs);
+        }
+    }
+    /* Auto-reconnect on any error except explicit user termination */
+    if (err_code != PPPERR_NONE && err_code != PPPERR_USER) {
+        printf("PPPoL2TP: scheduling reconnect in %d sec (err=%d (%s))\n",
+               g_reconnect_secs, err_code, ppp_err_str(err_code));
+        if (g_ppp_pcb) {
+            /* We are in tcpip_thread context; ppp_connect() is safe here */
+            ppp_connect(g_ppp_pcb, (u16_t)g_reconnect_secs);
+        }
+    }
 }
 
 /* Helper: locate the ZT netif by matching the provided IPv4 string
@@ -292,6 +312,16 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
     const u16_t remote_port = (u16_t)zt_forward_port;
 
     g_set_default_route = set_default_route ? 1 : 0;
+    /* Configure reconnect interval from env: L2TP_RECONNECT_SECS (default 10, clamp 1..3600) */
+    const char* reconn = std::getenv("L2TP_RECONNECT_SECS");
+    g_reconnect_secs = 10;
+    if (reconn && *reconn) {
+        int v = atoi(reconn);
+        if (v < 1) v = 1;
+        if (v > 3600) v = 3600;
+        g_reconnect_secs = v;
+    }
+    printf("PPPoL2TP: reconnect interval %d sec\n", g_reconnect_secs);
 
     /* Create PPP over L2TP session.
      * - pppif: PPP netif holder. We keep it static/global for lifetime reasons.
@@ -382,6 +412,27 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
         return ZTS_ERR_SERVICE;
     }
     printf("PPPoL2TP: pppapi_connect initiated\n");
+    return ZTS_ERR_OK;
+#endif
+}
+
+/* Public C API: nudge close + reconnect */
+extern "C" ZTS_API int ZTCALL zts_pppol2tp_nudge_close_reconnect(void)
+{
+#if !LWIP_IPV4 || !PPP_SUPPORT || !PPPOL2TP_SUPPORT
+    return ZTS_ERR_SERVICE;
+#else
+    if (!g_ppp_pcb) {
+        return ZTS_ERR_SERVICE;
+    }
+    g_force_reconnect_on_user.store(1);
+    err_t e = pppapi_close(g_ppp_pcb, 1 /* nocarrier */);
+    if (e != ERR_OK) {
+        g_force_reconnect_on_user.store(0);
+        printf("PPPoL2TP: pppapi_close failed err=%d\n", (int)e);
+        return ZTS_ERR_SERVICE;
+    }
+    printf("PPPoL2TP: nudge close requested (nocarrier); will reconnect in %d sec\n", g_reconnect_secs);
     return ZTS_ERR_OK;
 #endif
 }

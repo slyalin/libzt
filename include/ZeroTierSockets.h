@@ -2962,6 +2962,12 @@ ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
                                              const char* l2tp_secret,
                                              int set_default_route);
 
+/**
+ * Nudge PPPoL2TP: force-close current PPP session (nocarrier) and schedule reconnect after
+ * the configured interval (L2TP_RECONNECT_SECS). Returns ZTS_ERR_OK on success.
+ */
+ZTS_API int ZTCALL zts_pppol2tp_nudge_close_reconnect(void);
+
 //----------------------------------------------------------------------------//
 // Core query sub-API (Used for simplifying high-level language wrappers)     //
 //----------------------------------------------------------------------------//
