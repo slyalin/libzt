@@ -47,6 +47,7 @@ extern "C" int zts_diag_dump_netifs(const char* tag);
 #include <string>
 #include <cstdlib>
 #include <atomic>
+#include <chrono>
 
 #ifndef PPPERR_CONNECT_TIMEOUT
 #ifdef PPPERR_CONNECTTIME
@@ -63,8 +64,19 @@ static int g_set_default_route = 0;
 /* Keep stable copies of credentials for PPP lifetime */
 static std::string g_auth_user;
 static std::string g_auth_pass;
+/* Legacy fixed reconnect knob retained for compatibility but superseded by backoff */
 static int g_reconnect_secs = 10;
 static std::atomic<int> g_force_reconnect_on_user{0};
+/* Backoff and dampening parameters */
+static int g_reconnect_min_secs = 5;
+static int g_reconnect_max_secs = 120;
+static double g_backoff_factor = 2.0;
+static int g_current_backoff = 5;
+static int g_min_uptime_secs = 60;
+static std::chrono::steady_clock::time_point g_up_since{};
+/* LCP echo settings */
+static int g_lcp_echo_secs = 30;
+static int g_lcp_echo_fails = 3;
 
 /* Diagnostics helpers */
 static const char* ppp_err_str(int err_code)
@@ -229,22 +241,63 @@ static void ppp_link_status_cb(ppp_pcb* pcb, int err_code, void* ctx)
             printf("PPPoL2TP: link status change err=%d\n", err_code);
             break;
     }
-    /* Intentional close via watchdog: reconnect too */
-    if (err_code == PPPERR_USER && g_force_reconnect_on_user.load()) {
-        printf("PPPoL2TP: USER close (watchdog), scheduling reconnect in %d sec\n", g_reconnect_secs);
-        g_force_reconnect_on_user.store(0);
-        if (g_ppp_pcb) {
-            ppp_connect(g_ppp_pcb, (u16_t)g_reconnect_secs);
+    /* Track stable uptime for dampening/backoff reset */
+    if (err_code == PPPERR_NONE) {
+        auto now = std::chrono::steady_clock::now();
+        if (g_up_since.time_since_epoch().count() == 0) {
+            g_up_since = now;
+        } else {
+            auto up_s = std::chrono::duration_cast<std::chrono::seconds>(now - g_up_since).count();
+            if (up_s >= g_min_uptime_secs) {
+                if (g_current_backoff != g_reconnect_min_secs) {
+                    printf("PPPoL2TP: stable uptime >= %d sec, reset backoff to %d sec\n",
+                           g_min_uptime_secs, g_reconnect_min_secs);
+                }
+                g_current_backoff = g_reconnect_min_secs;
+                g_up_since = now; /* keep clock fresh */
+            }
         }
     }
-    /* Auto-reconnect on any error except explicit user termination */
+
+    /* Intentional close via watchdog: reconnect too (use min delay) */
+    if (err_code == PPPERR_USER && g_force_reconnect_on_user.load()) {
+        int delay = g_reconnect_min_secs;
+        printf("PPPoL2TP: USER close (watchdog), scheduling reconnect in %d sec\n", delay);
+        g_force_reconnect_on_user.store(0);
+        if (g_ppp_pcb) {
+            ppp_connect(g_ppp_pcb, (u16_t)delay);
+        }
+    }
+
+    /* Auto-reconnect on any error except explicit user termination, with backoff+jitter */
     if (err_code != PPPERR_NONE && err_code != PPPERR_USER) {
-        printf("PPPoL2TP: scheduling reconnect in %d sec (err=%d (%s))\n",
-               g_reconnect_secs, err_code, ppp_err_str(err_code));
+        int base = (g_current_backoff > 0) ? g_current_backoff : g_reconnect_min_secs;
+        int jitter = (base + 9) / 10; /* ~10% */
+        int delay = base;
+        if ((rand() & 1) != 0) {
+            delay = base + jitter;
+        } else {
+            delay = base - jitter;
+        }
+        if (delay < g_reconnect_min_secs) delay = g_reconnect_min_secs;
+        if (delay > g_reconnect_max_secs) delay = g_reconnect_max_secs;
+
+        printf("PPPoL2TP: scheduling reconnect in %d sec (err=%d (%s), backoff=%d, factor=%.2f, limits=[%d,%d])\n",
+               delay, err_code, ppp_err_str(err_code), base, g_backoff_factor, g_reconnect_min_secs, g_reconnect_max_secs);
+
         if (g_ppp_pcb) {
             /* We are in tcpip_thread context; ppp_connect() is safe here */
-            ppp_connect(g_ppp_pcb, (u16_t)g_reconnect_secs);
+            ppp_connect(g_ppp_pcb, (u16_t)delay);
         }
+
+        /* Increase backoff for next time, clamp to max */
+        int next_backoff = (int)(base * g_backoff_factor);
+        if (next_backoff < g_reconnect_min_secs) next_backoff = g_reconnect_min_secs;
+        if (next_backoff > g_reconnect_max_secs) next_backoff = g_reconnect_max_secs;
+        g_current_backoff = next_backoff;
+
+        /* Reset uptime clock on failure */
+        g_up_since = std::chrono::steady_clock::now();
     }
 }
 
@@ -312,16 +365,27 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
     const u16_t remote_port = (u16_t)zt_forward_port;
 
     g_set_default_route = set_default_route ? 1 : 0;
-    /* Configure reconnect interval from env: L2TP_RECONNECT_SECS (default 10, clamp 1..3600) */
-    const char* reconn = std::getenv("L2TP_RECONNECT_SECS");
-    g_reconnect_secs = 10;
-    if (reconn && *reconn) {
-        int v = atoi(reconn);
-        if (v < 1) v = 1;
-        if (v > 3600) v = 3600;
-        g_reconnect_secs = v;
+    /* Configure LCP echo and backoff from env (with sane defaults) */
+    {
+        const char* es = std::getenv("L2TP_LCP_ECHO_SECS");
+        const char* ef = std::getenv("L2TP_LCP_ECHO_FAILS");
+        g_lcp_echo_secs = (es && *es) ? std::max(0, atoi(es)) : 30;
+        g_lcp_echo_fails = (ef && *ef) ? std::max(0, atoi(ef)) : 3;
+        printf("PPPoL2TP: LCP echo interval %d sec, fails %d\n", g_lcp_echo_secs, g_lcp_echo_fails);
     }
-    printf("PPPoL2TP: reconnect interval %d sec\n", g_reconnect_secs);
+    {
+        const char* vmin = std::getenv("L2TP_RECONNECT_MIN_SECS");
+        const char* vmax = std::getenv("L2TP_RECONNECT_MAX_SECS");
+        const char* vbf  = std::getenv("L2TP_RECONNECT_BACKOFF");
+        const char* vupt = std::getenv("L2TP_MIN_UPTIME_SECS");
+        g_reconnect_min_secs = (vmin && *vmin) ? std::max(1, atoi(vmin)) : 5;
+        g_reconnect_max_secs = (vmax && *vmax) ? std::max(g_reconnect_min_secs, atoi(vmax)) : 120;
+        g_backoff_factor = (vbf && *vbf) ? std::max(1.0, atof(vbf)) : 2.0;
+        g_min_uptime_secs = (vupt && *vupt) ? std::max(1, atoi(vupt)) : 60;
+        g_current_backoff = g_reconnect_min_secs;
+        printf("PPPoL2TP: reconnect backoff min=%d max=%d factor=%.2f min_uptime=%d\n",
+               g_reconnect_min_secs, g_reconnect_max_secs, g_backoff_factor, g_min_uptime_secs);
+    }
 
     /* Create PPP over L2TP session.
      * - pppif: PPP netif holder. We keep it static/global for lifetime reasons.
@@ -354,6 +418,20 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
                u0, u1, zt_netif->num, (unsigned)zt_netif->flags, (unsigned)zt_netif->mtu);
         printf("PPPoL2TP: ppp_netif if=%c%c%u flags=0x%02x mtu=%u\n",
                n0, n1, g_ppp_netif.num, (unsigned)g_ppp_netif.flags, (unsigned)g_ppp_netif.mtu);
+    }
+
+/* Apply LCP echo settings (runtime), if supported by build */
+    {
+        /* pcb->settings fields exist per lwIP ppp.h; set them directly */
+        if (g_lcp_echo_secs < 0) g_lcp_echo_secs = 0;
+        if (g_lcp_echo_secs > 255) g_lcp_echo_secs = 255;
+        if (g_lcp_echo_fails < 0) g_lcp_echo_fails = 0;
+        if (g_lcp_echo_fails > 255) g_lcp_echo_fails = 255;
+        g_ppp_pcb->settings.lcp_echo_interval = (u8_t)g_lcp_echo_secs;
+        g_ppp_pcb->settings.lcp_echo_fails = (u8_t)g_lcp_echo_fails;
+        printf("PPPoL2TP: applied LCP echo settings (interval=%u, fails=%u)\n",
+               (unsigned)g_ppp_pcb->settings.lcp_echo_interval,
+               (unsigned)g_ppp_pcb->settings.lcp_echo_fails);
     }
 
 /* Enable PPP phase notifications for visibility into the handshake */
