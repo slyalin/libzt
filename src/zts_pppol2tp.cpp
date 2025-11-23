@@ -369,8 +369,8 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
     {
         const char* es = std::getenv("L2TP_LCP_ECHO_SECS");
         const char* ef = std::getenv("L2TP_LCP_ECHO_FAILS");
-        g_lcp_echo_secs = (es && *es) ? std::max(0, atoi(es)) : 30;
-        g_lcp_echo_fails = (ef && *ef) ? std::max(0, atoi(ef)) : 3;
+        g_lcp_echo_secs = (es && *es) ? std::max(0, atoi(es)) : 20;
+        g_lcp_echo_fails = (ef && *ef) ? std::max(0, atoi(ef)) : 2;
         printf("PPPoL2TP: LCP echo interval %d sec, fails %d\n", g_lcp_echo_secs, g_lcp_echo_fails);
     }
     {
@@ -379,7 +379,7 @@ extern "C" ZTS_API int ZTCALL zts_pppol2tp_start_bridge(const char* zt_bind_ip,
         const char* vbf  = std::getenv("L2TP_RECONNECT_BACKOFF");
         const char* vupt = std::getenv("L2TP_MIN_UPTIME_SECS");
         g_reconnect_min_secs = (vmin && *vmin) ? std::max(1, atoi(vmin)) : 5;
-        g_reconnect_max_secs = (vmax && *vmax) ? std::max(g_reconnect_min_secs, atoi(vmax)) : 120;
+        g_reconnect_max_secs = (vmax && *vmax) ? std::max(g_reconnect_min_secs, atoi(vmax)) : 20;
         g_backoff_factor = (vbf && *vbf) ? std::max(1.0, atof(vbf)) : 2.0;
         g_min_uptime_secs = (vupt && *vupt) ? std::max(1, atoi(vupt)) : 60;
         g_current_backoff = g_reconnect_min_secs;

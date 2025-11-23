@@ -658,31 +658,10 @@ extern "C" const ip4_addr_t* zts_lwip_hook_etharp_get_gw(struct netif* out, cons
 extern "C" int zts_lwip_hook_ip4_canforward(struct pbuf* p, unsigned long dest_addr_hostorder)
 {
     LWIP_UNUSED_ARG(p);
-    static int s_drop_ppp_fwd = -2; // -2=uninit, -1=off, 1=on
-    if (s_drop_ppp_fwd == -2) {
-        const char* dp = std::getenv("ZT_HOOKS_DROP_PPP_FWD");
-        s_drop_ppp_fwd = (dp && (*dp=='1' || *dp=='t' || *dp=='T' || *dp=='y' || *dp=='Y')) ? 1 : -1;
-    }
     uint32_t d = (uint32_t)dest_addr_hostorder;
     // If forwarding towards ZT per our route table, we may gate forwarding to isolate PPP->ZT path
     ZtRouteV4 r{};
     if (find_lpm(d, r)) {
-        if (s_drop_ppp_fwd == 1) {
-            extern struct netif* netif_default;
-            struct netif* zt = NULL;
-            if (g_zt_ip_host != 0) { zt = find_netif_by_ip4_host(g_zt_ip_host); }
-            if (netif_default && false /*it should be triggered for p2p lwIP configs, but ZT doesn't provide this mode*/ && zt) {
-                if (g_pkt_diag.load(std::memory_order_relaxed) != 0) {
-                    char dstbuf[16]; ip4_addr_t dst = host_to_ip4(d);
-                    ip4addr_ntoa_r(&dst, dstbuf, sizeof(dstbuf));
-                    printf("HOOK_FWD_DROP dst=%s reason=PPP->ZT gating netif_default=%c%c%u zt=%c%c%u\n",
-                           dstbuf, netif_default->name[0], netif_default->name[1], netif_default->num,
-                           zt->name[0], zt->name[1], zt->num);
-                    fflush(stdout);
-                }
-                return 0; // do not forward
-            }
-        }
         if (g_pkt_diag.load(std::memory_order_relaxed) == 0) {
             return -1;
         }
